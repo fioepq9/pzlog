@@ -49,14 +49,14 @@ import (
 )
 
 func main() {
-	log := zerolog.New(NewPtermWriter(func(pw *PtermWriter) {
-		pw.DefaultKeyStyle = func(key string, l zerolog.Level) *pterm.Style {
-			return pterm.NewStyle(pterm.Bold, pterm.FgGray)
-		}
-	})).With().
-		Timestamp().
-		Stack().
-		Logger()
+  log := zerolog.New(NewPtermWriter(func(pw *PtermWriter) {
+    pw.DefaultKeyStyle = func(key string, l zerolog.Level) *pterm.Style {
+      return pterm.NewStyle(pterm.Bold, pterm.FgGray)
+    }
+  })).With().
+    Timestamp().
+    Stack().
+    Logger()
   
   log.Info().Msg("ok")
 }
