@@ -131,11 +131,11 @@ func NewPtermWriter(options ...func(*PtermWriter)) *PtermWriter {
 	return &pt
 }
 
-func (pt *PtermWriter) Write(p []byte) (n int, err error) {
-	return pt.Out.Write(p)
+func (pw *PtermWriter) Write(p []byte) (n int, err error) {
+	return pw.Out.Write(p)
 }
 
-func (pt *PtermWriter) WriteLevel(lvl zerolog.Level, p []byte) (n int, err error) {
+func (pw *PtermWriter) WriteLevel(lvl zerolog.Level, p []byte) (n int, err error) {
 	var evt map[string]interface{}
 	d := json.NewDecoder(bytes.NewReader(p))
 	d.UseNumber()
@@ -146,11 +146,11 @@ func (pt *PtermWriter) WriteLevel(lvl zerolog.Level, p []byte) (n int, err error
 
 	var event Event
 	if ts, ok := evt[zerolog.TimestampFieldName]; ok {
-		event.Timestamp = pt.KeyStyles[zerolog.TimestampFieldName].Sprint(ts)
+		event.Timestamp = pw.KeyStyles[zerolog.TimestampFieldName].Sprint(ts)
 	}
-	event.Level = pt.LevelStyles[lvl].Sprint(lvl)
+	event.Level = pw.LevelStyles[lvl].Sprint(lvl)
 	if msg, ok := evt[zerolog.MessageFieldName]; ok {
-		event.Message = pt.KeyStyles[zerolog.MessageFieldName].Sprint(msg)
+		event.Message = pw.KeyStyles[zerolog.MessageFieldName].Sprint(msg)
 	}
 	event.Fields = make([]Field, 0, len(evt))
 	for k, v := range evt {
@@ -160,26 +160,26 @@ func (pt *PtermWriter) WriteLevel(lvl zerolog.Level, p []byte) (n int, err error
 			continue
 		}
 		var key string
-		if style, ok := pt.KeyStyles[k]; ok {
+		if style, ok := pw.KeyStyles[k]; ok {
 			key = style.Sprint(k)
 		} else {
-			key = pt.DefaultKeyStyle(k, lvl).Sprint(k)
+			key = pw.DefaultKeyStyle(k, lvl).Sprint(k)
 		}
 		var val string
-		if fn, ok := pt.ValFormatters[k]; ok {
+		if fn, ok := pw.ValFormatters[k]; ok {
 			val = fn(v)
 		} else {
-			val = pt.DefaultValFormatter(k, lvl)(v)
+			val = pw.DefaultValFormatter(k, lvl)(v)
 		}
 		event.Fields = append(event.Fields, Field{Key: key, Val: val})
 	}
 	sort.Slice(event.Fields, func(i, j int) bool {
-		return pt.KeyOrderFunc(event.Fields[i].Key, event.Fields[j].Key)
+		return pw.KeyOrderFunc(event.Fields[i].Key, event.Fields[j].Key)
 	})
 	var buf bytes.Buffer
-	err = pt.Tmpl.Execute(&buf, event)
+	err = pw.Tmpl.Execute(&buf, event)
 	if err != nil {
 		return n, fmt.Errorf("cannot execute template: %s", err)
 	}
-	return pt.Out.Write(buf.Bytes())
+	return pw.Out.Write(buf.Bytes())
 }
