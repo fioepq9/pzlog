@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -71,6 +72,7 @@ func NewPtermWriter(options ...func(*PtermWriter)) *PtermWriter {
 		ValFormatters: map[string]Formatter{},
 		KeyOrderFunc: func(k1, k2 string) bool {
 			score := func(s string) string {
+				s = color.ClearCode(s)
 				if s == zerolog.TimestampFieldName {
 					return string([]byte{0, 0})
 				}
@@ -171,6 +173,9 @@ func (pt *PtermWriter) WriteLevel(lvl zerolog.Level, p []byte) (n int, err error
 		}
 		event.Fields = append(event.Fields, Field{Key: key, Val: val})
 	}
+	sort.Slice(event.Fields, func(i, j int) bool {
+		return pt.KeyOrderFunc(event.Fields[i].Key, event.Fields[j].Key)
+	})
 	var buf bytes.Buffer
 	err = pt.Tmpl.Execute(&buf, event)
 	if err != nil {
