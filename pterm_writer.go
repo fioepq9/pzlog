@@ -3,66 +3,79 @@ package pzlog
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"math"
 	"os"
-	"sort"
+	"reflect"
 	"strings"
+	"text/template"
 
-	"io"
-
+	"github.com/goccy/go-json"
 	"github.com/gookit/color"
 	"github.com/pterm/pterm"
 	"github.com/rs/zerolog"
-	"github.com/samber/lo"
 )
 
-type field struct {
+type Field struct {
 	Key string
 	Val string
 }
 
-type PtermWriter struct {
-	MaxWidth        int
-	Out             io.Writer
-	TimeStyle       *pterm.Style
-	TraceLevelStyle *pterm.Style
-	DebugLevelStyle *pterm.Style
-	InfoLevelStyle  *pterm.Style
-	WarnLevelStyle  *pterm.Style
-	ErrorLevelStyle *pterm.Style
-	FatalLevelStyle *pterm.Style
-	PanicLevelStyle *pterm.Style
-	NoLevelStyle    *pterm.Style
-	KeyStyles       map[string]*pterm.Style
-	ValFormatters   map[string]func(padding int, v interface{}) string
-	Less            func(string, string) bool
+type Event struct {
+	Timestamp string
+	Level     string
+	Message   string
+	Fields    []Field
 }
 
-func NewPtermWriter(options ...func(*PtermWriter)) zerolog.LevelWriter {
-	pw := PtermWriter{
-		MaxWidth:        pterm.GetTerminalWidth(),
-		Out:             os.Stdout,
-		TimeStyle:       pterm.NewStyle(pterm.FgGray),
-		TraceLevelStyle: pterm.NewStyle(pterm.Bold, pterm.FgCyan),
-		DebugLevelStyle: pterm.NewStyle(pterm.Bold, pterm.FgBlue),
-		InfoLevelStyle:  pterm.NewStyle(pterm.Bold, pterm.FgGreen),
-		WarnLevelStyle:  pterm.NewStyle(pterm.Bold, pterm.FgYellow),
-		ErrorLevelStyle: pterm.NewStyle(pterm.Bold, pterm.FgRed),
-		FatalLevelStyle: pterm.NewStyle(pterm.Bold, pterm.FgRed),
-		PanicLevelStyle: pterm.NewStyle(pterm.Bold, pterm.FgRed),
-		NoLevelStyle:    pterm.NewStyle(pterm.Bold, pterm.FgWhite),
+type Formatter func(interface{}) string
+
+type PtermWriter struct {
+	MaxWidth int
+	Out      io.Writer
+
+	LevelStyles map[zerolog.Level]*pterm.Style
+
+	Tmpl *template.Template
+
+	DefaultKeyStyle     func(string, zerolog.Level) *pterm.Style
+	DefaultValFormatter func(string, zerolog.Level) Formatter
+
+	KeyStyles     map[string]*pterm.Style
+	ValFormatters map[string]Formatter
+
+	KeyOrderFunc func(string, string) bool
+}
+
+func NewPtermWriter(options ...func(*PtermWriter)) *PtermWriter {
+	pt := PtermWriter{
+		MaxWidth: pterm.GetTerminalWidth(),
+		Out:      os.Stdout,
+		LevelStyles: map[zerolog.Level]*pterm.Style{
+			zerolog.TraceLevel: pterm.NewStyle(pterm.Bold, pterm.FgCyan),
+			zerolog.DebugLevel: pterm.NewStyle(pterm.Bold, pterm.FgBlue),
+			zerolog.InfoLevel:  pterm.NewStyle(pterm.Bold, pterm.FgGreen),
+			zerolog.WarnLevel:  pterm.NewStyle(pterm.Bold, pterm.FgYellow),
+			zerolog.ErrorLevel: pterm.NewStyle(pterm.Bold, pterm.FgRed),
+			zerolog.FatalLevel: pterm.NewStyle(pterm.Bold, pterm.FgRed),
+			zerolog.PanicLevel: pterm.NewStyle(pterm.Bold, pterm.FgRed),
+			zerolog.NoLevel:    pterm.NewStyle(pterm.Bold, pterm.FgWhite),
+		},
 		KeyStyles: map[string]*pterm.Style{
-			zerolog.CallerFieldName:     pterm.NewStyle(pterm.FgGray),
-			zerolog.ErrorFieldName:      pterm.NewStyle(pterm.FgRed),
-			zerolog.ErrorStackFieldName: pterm.NewStyle(pterm.FgRed),
+			zerolog.MessageFieldName:    pterm.NewStyle(pterm.Bold, pterm.FgWhite),
+			zerolog.TimestampFieldName:  pterm.NewStyle(pterm.Bold, pterm.FgGray),
+			zerolog.CallerFieldName:     pterm.NewStyle(pterm.Bold, pterm.FgGray),
+			zerolog.ErrorFieldName:      pterm.NewStyle(pterm.Bold, pterm.FgRed),
+			zerolog.ErrorStackFieldName: pterm.NewStyle(pterm.Bold, pterm.FgRed),
 		},
-		ValFormatters: map[string]func(padding int, v interface{}) string{
-			zerolog.ErrorStackFieldName: TreeFormatter,
-		},
-		Less: func(s1, s2 string) bool {
+		ValFormatters: map[string]Formatter{},
+		KeyOrderFunc: func(k1, k2 string) bool {
 			score := func(s string) string {
+				if s == zerolog.TimestampFieldName {
+					return string([]byte{0, 0})
+				}
 				if s == zerolog.CallerFieldName {
-					return string([]byte{0})
+					return string([]byte{0, 1})
 				}
 				if s == zerolog.ErrorFieldName {
 					return string([]byte{math.MaxUint8, 0})
@@ -72,22 +85,55 @@ func NewPtermWriter(options ...func(*PtermWriter)) zerolog.LevelWriter {
 				}
 				return s
 			}
-			return score(s1) < score(s2)
+			return score(k1) < score(k2)
 		},
 	}
 
-	for _, opt := range options {
-		opt(&pw)
+	tmpl := `{{ .Timestamp }} {{ .Level }}  {{ .Message }}
+{{- range $i, $field := .Fields }}
+{{ space (totalLength 1 $.Timestamp $.Level) }}{{if (last $i $.Fields )}}└{{else}}├{{ end }} {{ .Key }}: {{ .Val }}
+{{- end }}
+`
+	t, err := template.New("event").
+		Funcs(template.FuncMap{
+			"space": func(n int) string {
+				return strings.Repeat(" ", n)
+			},
+			"totalLength": func(n int, s ...string) int {
+				return len(color.ClearCode(strings.Join(s, ""))) - n
+			},
+			"last": func(x int, a interface{}) bool {
+				return x == reflect.ValueOf(a).Len()-1
+			},
+		}).
+		Parse(tmpl)
+	if err != nil {
+		panic(fmt.Errorf("cannot parse template: %s", err))
+	}
+	pt.Tmpl = t
+
+	pt.DefaultKeyStyle = func(_ string, lvl zerolog.Level) *pterm.Style {
+		return pt.LevelStyles[lvl]
 	}
 
-	return &pw
+	pt.DefaultValFormatter = func(key string, lvl zerolog.Level) Formatter {
+		return func(v interface{}) string {
+			return pterm.Sprint(v)
+		}
+	}
+
+	for _, option := range options {
+		option(&pt)
+	}
+
+	return &pt
 }
 
-func (pw *PtermWriter) Write(p []byte) (n int, err error) {
-	return pw.Out.Write(p)
+func (pt *PtermWriter) Write(p []byte) (n int, err error) {
+	return pt.Out.Write(p)
 }
 
-func (pw *PtermWriter) WriteLevel(level zerolog.Level, p []byte) (n int, err error) {
+func (pt *PtermWriter) WriteLevel(lvl zerolog.Level, p []byte) (n int, err error) {
 	var evt map[string]interface{}
 	d := json.NewDecoder(bytes.NewReader(p))
 	d.UseNumber()
@@ -96,135 +142,39 @@ func (pw *PtermWriter) WriteLevel(level zerolog.Level, p []byte) (n int, err err
 		return n, fmt.Errorf("cannot decode event: %s", err)
 	}
 
-	var buf bytes.Buffer
-
-	// timestamp
-	if timestamp, ok := evt[zerolog.TimestampFieldName]; ok {
-		delete(evt, zerolog.TimestampFieldName)
-		buf.WriteString(pw.TimeStyle.Sprint(timestamp) + " ")
+	var event Event
+	if ts, ok := evt[zerolog.TimestampFieldName]; ok {
+		event.Timestamp = pt.KeyStyles[zerolog.TimestampFieldName].Sprint(ts)
 	}
-
-	// level
-	delete(evt, zerolog.LevelFieldName)
-	var lvlStyle *pterm.Style
-	switch level {
-	case zerolog.TraceLevel:
-		lvlStyle = pw.TraceLevelStyle
-	case zerolog.DebugLevel:
-		lvlStyle = pw.DebugLevelStyle
-	case zerolog.InfoLevel:
-		lvlStyle = pw.InfoLevelStyle
-	case zerolog.WarnLevel:
-		lvlStyle = pw.WarnLevelStyle
-	case zerolog.ErrorLevel:
-		lvlStyle = pw.ErrorLevelStyle
-	case zerolog.FatalLevel:
-		lvlStyle = pw.FatalLevelStyle
-	case zerolog.PanicLevel:
-		lvlStyle = pw.PanicLevelStyle
-	case zerolog.NoLevel:
-		lvlStyle = pw.NoLevelStyle
-	case zerolog.Disabled:
-		lvlStyle = pw.NoLevelStyle
-	default:
-		lvlStyle = pw.NoLevelStyle
+	event.Level = pt.LevelStyles[lvl].Sprint(lvl)
+	if msg, ok := evt[zerolog.MessageFieldName]; ok {
+		event.Message = pt.KeyStyles[zerolog.MessageFieldName].Sprint(msg)
 	}
-	buf.WriteString(lvlStyle.Sprintf("%+5s", strings.ToUpper(level.String())))
-	padding := len(color.ClearCode(buf.String())) - 3
-
-	// message
-	if message, ok := evt[zerolog.MessageFieldName]; ok {
-		delete(evt, zerolog.MessageFieldName)
-		terminalWidth := lo.Min([]int{pterm.GetTerminalWidth(), pw.MaxWidth})
-		remainingWidth := terminalWidth - len(color.ClearCode(buf.String())) - 2
-		lines := strings.Split(pterm.Sprint(message), "\n")
-		lines = lo.Filter(lines, func(line string, _ int) bool {
-			return len(line) != 0
-		})
-		sep := "\n" + strings.Repeat(" ", padding) + "│     "
-		switch len(lines) {
-		case 0:
-			buf.WriteByte('\n')
-		case 1:
-			msg := "  " + lines[0]
-			if len(msg) > remainingWidth {
-				msg = pterm.DefaultParagraph.WithMaxWidth(remainingWidth).Sprint(msg)
-				msg = "  " + strings.ReplaceAll(msg, "\n", sep)
-				buf.WriteString(msg)
-				buf.WriteString("\n" + strings.Repeat(" ", padding) + "└" + strings.Repeat("-", remainingWidth))
-			} else {
-				buf.WriteString(msg)
-			}
-		default:
-			for i, msg := range lines {
-				if len(msg) > remainingWidth {
-					msg = pterm.DefaultParagraph.WithMaxWidth(remainingWidth).Sprint(msg)
-					msg = "  " + strings.ReplaceAll(msg, "\n", sep)
-				} else if i == 0 {
-					msg = "  " + msg
-				} else {
-					msg = "  " + sep + msg
-				}
-				buf.WriteString(msg)
-			}
-			buf.WriteString("\n" + strings.Repeat(" ", padding) + "└" + strings.Repeat("-", remainingWidth))
-		}
-	}
-
-	// fields
-	fields := make([]field, 0)
+	event.Fields = make([]Field, 0, len(evt))
 	for k, v := range evt {
-		fields = append(fields, field{
-			Key: k,
-			Val: pw.Ksprint(lvlStyle, k) + pw.Vsprint(padding, k, v),
-		})
-	}
-	sort.Slice(fields, func(i, j int) bool {
-		return pw.Less(fields[i].Key, fields[j].Key)
-	})
-
-	for i, field := range fields {
-		var pipe string
-		if i < len(fields)-1 {
-			pipe = "├"
-		} else {
-			pipe = "└"
+		if k == zerolog.TimestampFieldName ||
+			k == zerolog.LevelFieldName ||
+			k == zerolog.MessageFieldName {
+			continue
 		}
-		buf.WriteString("\n" + strings.Repeat(" ", padding) + pipe + " " + field.Val)
+		var key string
+		if style, ok := pt.KeyStyles[k]; ok {
+			key = style.Sprint(k)
+		} else {
+			key = pt.DefaultKeyStyle(k, lvl).Sprint(k)
+		}
+		var val string
+		if fn, ok := pt.ValFormatters[k]; ok {
+			val = fn(v)
+		} else {
+			val = pt.DefaultValFormatter(k, lvl)(v)
+		}
+		event.Fields = append(event.Fields, Field{Key: key, Val: val})
 	}
-
-	buf.WriteByte('\n')
-	_, err = buf.WriteTo(pw.Out)
-	return n, err
-}
-
-func (pw *PtermWriter) Ksprint(defaultStyle *pterm.Style, k string) string {
-	if style, ok := pw.KeyStyles[k]; ok {
-		return style.Sprint(k)
-	}
-	return defaultStyle.Sprint(k)
-}
-
-func (pw *PtermWriter) Vsprint(padding int, k string, v interface{}) string {
-	if formatter, ok := pw.ValFormatters[k]; ok {
-		return formatter(padding, v)
-	}
-	return pterm.Sprintf(": %v", v)
-}
-
-func TreeFormatter(padding int, v interface{}) string {
-	arr, ok := v.([]interface{})
-	if !ok {
-		return pterm.Sprint(v)
-	}
-	nodes := make([]pterm.TreeNode, 0)
-	for _, info := range arr {
-		infoJSON, _ := json.MarshalToString(info)
-		nodes = append(nodes, pterm.TreeNode{Text: infoJSON})
-	}
-	s, err := pterm.DefaultTree.WithRoot(pterm.TreeNode{Children: nodes}).Srender()
+	var buf bytes.Buffer
+	err = pt.Tmpl.Execute(&buf, event)
 	if err != nil {
-		return pterm.Sprint(v)
+		return n, fmt.Errorf("cannot execute template: %s", err)
 	}
-	return strings.ReplaceAll("\n"+s, "\n", "\n"+strings.Repeat(" ", padding))
+	return pt.Out.Write(buf.Bytes())
 }
